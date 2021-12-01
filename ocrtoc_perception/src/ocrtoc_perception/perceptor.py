@@ -21,6 +21,8 @@ from .pose.pose_correspondence import get_pose_superglue
 from ocrtoc_common.camera_interface import CameraInterface
 from ocrtoc_common.transform_interface import TransformInterface
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2
+import pickle
+
 
 def crop_pcd(pcds, i, reconstruction_config):
     points, colors = o3dp.pcd2array(pcds[i])
@@ -246,7 +248,7 @@ class Perceptor():
             raise ValueError('"use_camrera" should be "kinect", "realsense" or "both"')
         if self.debug:
             t2 = time.time()
-            rospy.loginfo('Capturing data time:{}'.format(t2 - t1))
+            rospy.loginfo('Capturing data time:{}'.format(t2 - t1))                      
         return full_pcd, color_images, camera_poses
 
     def compute_6d_pose(self, full_pcd, color_images, camera_poses, pose_method, object_list):
@@ -440,7 +442,6 @@ class Perceptor():
         if self.debug:
             frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
             o3d.visualization.draw_geometries([frame, full_pcd, *gg.to_open3d_geometry_list()])
-
         # Computer Object 6d Poses
         object_poses = self.compute_6d_pose(
             full_pcd = full_pcd,
@@ -449,7 +450,23 @@ class Perceptor():
             pose_method = pose_method,
             object_list = object_list
         )
-
+        ### ADDED HERE ###
+        rospack = rospkg.RosPack()
+        taskid = rospy.get_param('/pybullet_env/task_index')
+        save_path = os.path.join(rospack.get_path('ocrtoc_perception'),'data', taskid,'')
+        if not os.path.exists(save_path):
+            os.mkdir(save_path)
+        o3d.io.write_point_cloud(save_path + 'full_pcd.pcd', full_pcd) 
+        with open(save_path +  'color_images.pickle', 'wb') as handle:
+            pickle.dump(color_images, handle, protocol=pickle.HIGHEST_PROTOCOL)  
+        with open(save_path + 'camera_poses.pickle', 'wb') as handle:
+            pickle.dump(camera_poses, handle, protocol=pickle.HIGHEST_PROTOCOL) 
+        with open(save_path + 'gg.pickle', 'wb') as handle:
+            pickle.dump(gg, handle, protocol=pickle.HIGHEST_PROTOCOL)                    
+        with open(save_path + 'object_poses.pickle', 'wb') as handle:
+            pickle.dump(object_poses, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        ### ADDED END ###
+        
         # Assign the Best Grasp Pose on Each Object
         grasp_poses, remain_gg = self.assign_grasp_pose(gg, object_poses)
         if self.debug and pose_method == 'icp':

@@ -30,6 +30,8 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/perception_entrance.py
   scripts/perception_server.py
+  scripts/perception_entrance2.py
+  scripts/perception_server2.py  
   test/perception_target_client.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
