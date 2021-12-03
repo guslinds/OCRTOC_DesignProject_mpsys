@@ -8,11 +8,13 @@ import rospkg
 import open3d as o3d
 import open3d_plus as o3dp
 from transforms3d.quaternions import mat2quat
+from transforms3d.euler import mat2euler
+from geometry_msgs.msg import PoseStamped
 import time
 import copy
 import os
 from copy import deepcopy
-
+from geometry_msgs.msg import Twist
 from .arm_controller import ArmController
 from .graspnet import GraspNetBaseLine
 from .pose.pose_6d import get_6d_pose_by_geometry, load_model_pcd
@@ -450,10 +452,44 @@ class Perceptor():
             object_list = object_list
         )
 
+        
+        rospy.loginfo("###################################################### object poses")
+        rospy.loginfo(object_poses)
+
+        rospy.loginfo("###################################################### one object pose extracted")
+
+        pose0 = list(object_poses.values())[0]['pose']
+        rospy.loginfo(pose0)
+
+        rotation = pose0[0:3,0:3]
+        translation = pose0[0:3,3]
+        rotation_quat = mat2quat(rotation)
+
+        p_stamped = PoseStamped()
+
+        p_stamped.pose.position.x = translation[0]
+        p_stamped.pose.position.y = translation[1]
+        p_stamped.pose.position.z = translation[2]
+        
+        p_stamped.pose.orientation.x = rotation_quat[0]
+        p_stamped.pose.orientation.y = rotation_quat[1]
+        p_stamped.pose.orientation.z = rotation_quat[2]
+        p_stamped.pose.orientation.w = rotation_quat[3]
+
+        pub = rospy.Publisher('object_pose_publisher', PoseStamped, queue_size=10)
+        rate = rospy.Rate(10) # 10hz
+        while not rospy.is_shutdown():
+            p_stamped.header.stamp = rospy.Time.now()
+            p_stamped.header.frame_id = 'world'
+            rospy.loginfo("Publishing pose")
+            pub.publish(p_stamped)
+            rate.sleep()    
+
         # Assign the Best Grasp Pose on Each Object
         grasp_poses, remain_gg = self.assign_grasp_pose(gg, object_poses)
         if self.debug and pose_method == 'icp':
             o3d.visualization.draw_geometries([full_pcd, *remain_gg])
+        
         return object_poses, grasp_poses
 
     def get_response(self, object_list):
