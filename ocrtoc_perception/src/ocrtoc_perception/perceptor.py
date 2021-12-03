@@ -3,6 +3,7 @@
 import numpy as np
 import cv2
 from numpy.core.numeric import full
+from ocrtoc_perception.src.ocrtoc_perception.graspnet.models.graspnet import pred_decode
 import rospy
 import rospkg
 import open3d as o3d
@@ -306,7 +307,23 @@ class Perceptor():
         # all the returned result in 'world' frame. 'gg' using 'graspnet' gripper frame.
         return gg
 
+    
+    def center_of_mass_score(self, gg, object_poses):
+        penalty_factor = 1
+        ts = gg.translations
+        rs = gg.rotation_matrices
+        depths = gg.depths
+        #Move the center to the eelink frame
+        ts = ts + rs[:,:,0] * (np.vstack((depths, depths, depths)).T)
+        dists = np.linalg.norm(ts - object_poses['pose'][:3,3], axis=1)
+        gg.scores = gg.scores + dists*penalty_factor
+        return gg
+
     def assign_grasp_pose(self, gg, object_poses):
+        ####################################################
+        #Add weight for distance between CoM and grasp point
+        ####################################################    
+        self.center_of_mass_score(gg, object_poses)
         grasp_poses = dict()
         dist_thresh = self.config['response']['dist_thresh']
         # - dist_thresh: float of the minimum distance from the grasp pose center to the object center. The unit is millimeter.
@@ -341,6 +358,8 @@ class Perceptor():
 
         # min_object_ids: np.array of the id of the nearest object.
         min_object_ids = -1 * np.ones(shape = (len(rs)), dtype = np.int32)
+
+        
 
 
         # first round to find the object that each grasp belongs to.
