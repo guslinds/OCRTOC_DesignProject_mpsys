@@ -452,7 +452,57 @@ class Perceptor():
             object_list = object_list
         )
 
-        
+        # Written by Erik
+
+        publish_poses = True
+
+        # Extracts poses from dictionary into list
+        object_pose_list = list(object_poses.values()) 
+        object_pose_list_len = len(object_pose_list)
+
+
+        # Reformat poses in list to PoseStamped datatype
+        object_pose_stamped_list = [None]*object_pose_list_len
+
+        for i in range(object_pose_list_len):
+            object_pose = object_pose_list[i]['pose']
+            object_rot = mat2quat(object_pose[0:3,0:3])
+            object_trans = object_pose[0:3,3]
+
+            p_stamped = PoseStamped()
+
+            p_stamped.pose.position.x = object_trans[0]
+            p_stamped.pose.position.y = object_trans[1]
+            p_stamped.pose.position.z = object_trans[2]
+
+            p_stamped.pose.orientation.x = object_rot[0]
+            p_stamped.pose.orientation.y = object_rot[1]
+            p_stamped.pose.orientation.z = object_rot[2]
+            p_stamped.pose.orientation.w = object_rot[3]
+
+            p_stamped.header.frame_id = 'world'
+
+            object_pose_stamped_list[i] = p_stamped
+
+        # Creates a list of publishers and instansiates publishers
+        publisher_list = [None]*object_pose_list_len
+
+        for i in range(object_pose_list_len):
+            topic_name = 'object_pose_publisher_idx' + str(i)
+            publisher_list[i] = rospy.Publisher(topic_name, PoseStamped, queue_size=10)
+
+        # for all poses, set time stamp and publish
+        rate = rospy.Rate(10) # 10hz
+        if publish_poses:
+            while not rospy.is_shutdown():
+                for i in range(object_pose_list_len):
+                    object_pose_stamped = object_pose_stamped_list[i]
+                    object_pose_stamped.header.stamp = rospy.Time.now()
+                    pub = publisher_list[i]
+                    rospy.loginfo("Publishing pose for object with idx " + str(i))
+                    pub.publish(object_pose_stamped)
+
+        """
         rospy.loginfo("###################################################### object poses")
         rospy.loginfo(object_poses)
 
@@ -483,7 +533,7 @@ class Perceptor():
             p_stamped.header.frame_id = 'world'
             rospy.loginfo("Publishing pose")
             pub.publish(p_stamped)
-            rate.sleep()    
+            rate.sleep() """    
 
         # Assign the Best Grasp Pose on Each Object
         grasp_poses, remain_gg = self.assign_grasp_pose(gg, object_poses)
