@@ -90,6 +90,86 @@ def process_pcds(pcds, use_camera, reconstruction_config):
         pcd.estimate_normals()
     return trans, pcd
 
+def assign_grasps_to_object(rs, ts, object_poses): #Helper function to center_of_mass filter
+    dist_thresh = np.inf
+    min_dists = np.inf * np.ones((len(rs)))
+    min_object_ids = -1 * np.ones(shape = (len(rs)), dtype = np.int32)
+    for i, object_name in enumerate(object_poses.keys()):
+        #object_names.append(object_name)
+        object_pose = object_poses[object_name]
+
+        dists = np.linalg.norm(ts - object_pose['pose'][:3,3], axis=1)
+        object_mask = np.logical_and(dists < min_dists, dists < dist_thresh)
+
+        min_object_ids[object_mask] = i
+        min_dists[object_mask] = dists[object_mask]
+    return object_mask, min_object_ids
+
+def center_of_mass_score(gg, object_poses):
+    penalty_factor = 1
+    ts = gg.translations
+    rs = gg.rotation_matrices
+    depths = gg.depths
+    ts = ts + rs[:,:,0]*(np.vstack((depths, depths, depths)).T)
+    dists = []
+    object_mask, min_object_ids = assign_grasps_to_object(rs, ts, object_poses)
+    for i, object_name in enumerate(object_poses.keys()):
+        object_pose = object_poses[object_name]
+        ts_temp = ts[min_object_ids == i]
+        dists.append(np.linalg.norm(ts_temp-object_pose['pose'][:3,3], axis=1))
+    dists = np.concatenate(dists)
+    gg.scores = gg.scores - dists
+    gg.scores = gg.scores/max(gg.scores)
+    return gg
+
+
+def pointsInCollisionBox(graspRot, graspTrans, pointCloud):
+    pose = np.c_[graspRot.T, -np.dot(graspRot.T,graspTrans)]
+    
+    y_offset = 0.10
+    z_offset = 0.03
+    x_range = [-0.125, -0.025]
+    
+    y_range = [-y_offset, y_offset]
+    z_range = [-z_offset, z_offset]
+    
+    marker = np.zeros(np.shape(pointCloud)[0]).astype(int)
+    
+    for j in range(np.shape(pointCloud)[0]):
+        
+        point_hom = np.vstack((pointCloud[j,:].reshape(3,1),1))
+        point_transformed = np.dot(pose,point_hom)
+        
+        #product = np.dot(np.subtract(graspTrans.reshape(3,1), point).T, normal)
+        x = point_transformed[0]
+        y = point_transformed[1]
+        z = point_transformed[2]
+        
+        if x_range[0] < x < x_range[1]:
+            if y_range[0] < y < y_range[1]:
+                if z_range[0] < z < z_range[1]:
+                    marker[j] = 1
+    
+    pointcloud_smaller = np.zeros((sum(marker),3))
+    idx = 0
+    for i in range(len(marker)):
+        if marker[i]:
+            pointcloud_smaller[idx] = pointCloud[i]
+            idx = idx +1
+    
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pointcloud_smaller)
+
+    rospack = rospkg.RosPack()
+    taskid = rospy.get_param('/pybullet_env/task_index')
+    save_path = os.path.join(rospack.get_path('ocrtoc_perception'),'data', taskid,'')
+    if not os.path.exists(save_path):
+        os.mkdir(save_path)
+    o3d.io.write_point_cloud(save_path + 'test_pcd.pcd', pcd) 
+
+    return marker
+    
+
 class Perceptor():
     def __init__(
         self,
@@ -98,11 +178,11 @@ class Perceptor():
         self.config = config
         self.debug = self.config['debug']
         self.graspnet_baseline = GraspNetBaseLine(
-            checkpoint_path = os.path.join(
-                rospkg.RosPack().get_path('ocrtoc_perception'),
-                self.config['graspnet_checkpoint_path']
+                checkpoint_path = os.path.join(rospkg.RosPack().get_path('ocrtoc_perception'),self.config['graspnet_checkpoint_path']),
+                collision_thresh=0.001,
+                empty_thresh=0,
+                voxel_size=1
             )
-        )
         self.color_info_topic_name = self.config['color_info_topic_name']
         self.color_topic_name = self.config['color_topic_name']
         self.depth_topic_name = self.config['depth_topic_name']
@@ -308,7 +388,7 @@ class Perceptor():
         # all the returned result in 'world' frame. 'gg' using 'graspnet' gripper frame.
         return gg
 
-    def assign_grasp_pose(self, gg, object_poses):
+    def assign_grasp_pose(self, gg, object_poses, pointCloud):
         grasp_poses = dict()
         dist_thresh = self.config['response']['dist_thresh']
         # - dist_thresh: float of the minimum distance from the grasp pose center to the object center. The unit is millimeter.
@@ -320,7 +400,7 @@ class Perceptor():
         #          /   |
         #         /    |
         # Angle should be smaller than this angle
-
+        gg = center_of_mass_score(gg, object_poses)
         object_names = []
         # gg: GraspGroup in 'world' frame of 'graspnet' gripper frame.
         # x is the approaching direction.
@@ -370,12 +450,12 @@ class Perceptor():
             # For safety and planning difficulty reason, grasp pose with small angle with gravity direction will be accept.
             # if no grasp pose is available within the safe cone. grasp pose with the smallest angle will be used without
             # considering the angle.
-            if np.sum(add_angle_mask) < self.config['response']['mask_thresh']: # actually this should be mask == 0, for safety reason, < 0.5 is used.
-                mask = obj_id_mask
-                sorting_method = 'angle'
-            else:
-                mask = add_angle_mask
-                sorting_method = 'score'
+            #if np.sum(add_angle_mask) < self.config['response']['mask_thresh']: # actually this should be mask == 0, for safety reason, < 0.5 is used.
+            mask = obj_id_mask
+            sorting_method = 'score'
+            #else:
+            #    mask = add_angle_mask
+            #    sorting_method = 'score'
             if self.debug:
                 print(f'{object_name} using sorting method{sorting_method}, mask num:{np.sum(mask)}')
             i_scores = scores[mask]
@@ -383,11 +463,60 @@ class Perceptor():
             i_eelink_rs = eelink_rs[mask]
             i_rs = rs[mask]
             i_gg = gg[mask]
-            if np.sum(mask) < self.config['response']['mask_thresh']: # actually this should be mask == 0, for safety reason, < 0.5 is used.
+            #if np.sum(mask) < self.config['response']['mask_thresh']: # actually this should be mask == 0, for safety reason, < 0.5 is used.
+            if False:
                 # ungraspable
                 grasp_poses[object_name] = None
             else:
                 if sorting_method == 'score':
+                    rospy.loginfo("######################################################################################")
+                    best_grasp_id = None
+
+                    idx_with_highest_score = np.argmax(i_scores)
+                    higest_score = i_scores[idx_with_highest_score]
+
+                    idx_with_least_points_in_collision_box = None
+                    least_points = np.inf
+                    
+                    number_of_poses = len(i_scores)
+                    if number_of_poses == 0:
+                        continue
+                    for j in range(number_of_poses):
+                        grasp_idx_to_check = np.argmax(i_scores)
+
+                        rot = i_rs[grasp_idx_to_check]
+                        trans = i_ts[grasp_idx_to_check]
+
+                        
+                        marker = pointsInCollisionBox(rot, trans, pointCloud)
+                        return
+                        amt_points = sum(marker)
+
+                        rospy.loginfo("Object: " + object_name + ", grasp " + str(j) + "/" + str(number_of_poses) + "grasp score: " + str(i_scores[grasp_idx_to_check]) +  ", points in collsion box: " + str(amt_points))
+                        """
+                        För många points 5000-8000 på varje pose
+                        argmax av empty sequence. Är i_scores tom för vissa objekt?
+                        
+                        """
+                        tolerance = 250
+
+                        if amt_points < least_points:
+                            least_points = amt_points
+                            idx_with_least_points_in_collision_box = grasp_idx_to_check
+
+
+                        if amt_points > tolerance:
+                            i_scores[grasp_idx_to_check] = -1
+                        else: 
+                            best_grasp_id = grasp_idx_to_check
+                            break
+                    
+                    if best_grasp_id is None:
+                        best_grasp_id = idx_with_least_points_in_collision_box
+                    else:    
+                        best_grasp_id = np.argmax(i_scores)
+
+
                     best_grasp_id = np.argmax(i_scores)
                 elif sorting_method == 'angle':
                     best_grasp_id = np.argmin(i_rs[:, 2, 0])
@@ -443,6 +572,9 @@ class Perceptor():
             frame = o3d.geometry.TriangleMesh.create_coordinate_frame(0.1)
             o3d.visualization.draw_geometries([frame, full_pcd, *gg.to_open3d_geometry_list()])
 
+
+        
+
         # Computer Object 6d Poses
         object_poses = self.compute_6d_pose(
             full_pcd = full_pcd,
@@ -452,91 +584,10 @@ class Perceptor():
             object_list = object_list
         )
 
-        # Written by Erik
-
-        publish_poses = True
-
-        # Extracts poses from dictionary into list
-        object_pose_list = list(object_poses.values()) 
-        object_pose_list_len = len(object_pose_list)
-
-
-        # Reformat poses in list to PoseStamped datatype
-        object_pose_stamped_list = [None]*object_pose_list_len
-
-        for i in range(object_pose_list_len):
-            object_pose = object_pose_list[i]['pose']
-            object_rot = mat2quat(object_pose[0:3,0:3])
-            object_trans = object_pose[0:3,3]
-
-            p_stamped = PoseStamped()
-
-            p_stamped.pose.position.x = object_trans[0]
-            p_stamped.pose.position.y = object_trans[1]
-            p_stamped.pose.position.z = object_trans[2]
-
-            p_stamped.pose.orientation.x = object_rot[0]
-            p_stamped.pose.orientation.y = object_rot[1]
-            p_stamped.pose.orientation.z = object_rot[2]
-            p_stamped.pose.orientation.w = object_rot[3]
-
-            p_stamped.header.frame_id = 'world'
-
-            object_pose_stamped_list[i] = p_stamped
-
-        # Creates a list of publishers and instansiates publishers
-        publisher_list = [None]*object_pose_list_len
-
-        for i in range(object_pose_list_len):
-            topic_name = 'object_pose_publisher_idx' + str(i)
-            publisher_list[i] = rospy.Publisher(topic_name, PoseStamped, queue_size=10)
-
-        # for all poses, set time stamp and publish
-        rate = rospy.Rate(10) # 10hz
-        if publish_poses:
-            while not rospy.is_shutdown():
-                for i in range(object_pose_list_len):
-                    object_pose_stamped = object_pose_stamped_list[i]
-                    object_pose_stamped.header.stamp = rospy.Time.now()
-                    pub = publisher_list[i]
-                    rospy.loginfo("Publishing pose for object with idx " + str(i))
-                    pub.publish(object_pose_stamped)
-
-        """
-        rospy.loginfo("###################################################### object poses")
-        rospy.loginfo(object_poses)
-
-        rospy.loginfo("###################################################### one object pose extracted")
-
-        pose0 = list(object_poses.values())[0]['pose']
-        rospy.loginfo(pose0)
-
-        rotation = pose0[0:3,0:3]
-        translation = pose0[0:3,3]
-        rotation_quat = mat2quat(rotation)
-
-        p_stamped = PoseStamped()
-
-        p_stamped.pose.position.x = translation[0]
-        p_stamped.pose.position.y = translation[1]
-        p_stamped.pose.position.z = translation[2]
-        
-        p_stamped.pose.orientation.x = rotation_quat[0]
-        p_stamped.pose.orientation.y = rotation_quat[1]
-        p_stamped.pose.orientation.z = rotation_quat[2]
-        p_stamped.pose.orientation.w = rotation_quat[3]
-
-        pub = rospy.Publisher('object_pose_publisher', PoseStamped, queue_size=10)
-        rate = rospy.Rate(10) # 10hz
-        while not rospy.is_shutdown():
-            p_stamped.header.stamp = rospy.Time.now()
-            p_stamped.header.frame_id = 'world'
-            rospy.loginfo("Publishing pose")
-            pub.publish(p_stamped)
-            rate.sleep() """    
 
         # Assign the Best Grasp Pose on Each Object
-        grasp_poses, remain_gg = self.assign_grasp_pose(gg, object_poses)
+        pointCloud = np.asarray(full_pcd.points)
+        grasp_poses, remain_gg = self.assign_grasp_pose(gg, object_poses, pointCloud)
         if self.debug and pose_method == 'icp':
             o3d.visualization.draw_geometries([full_pcd, *remain_gg])
         
